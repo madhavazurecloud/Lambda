@@ -1,0 +1,52 @@
+import boto3
+from datetime import datetime, timezone
+
+def lambda_handler(event, context):
+    s3 = boto3.client('s3')
+    cloudtrail = boto3.client('cloudtrail')
+    now = datetime.now(timezone.utc)
+    delete_threshold = now.timestamp() - (30 * 60)  # 30 minutes in seconds
+
+    # Get the list of all buckets
+    response = s3.list_buckets()
+    buckets = response.get('Buckets', [])
+    
+    for bucket in buckets:
+        bucket_name = bucket['Name']
+        creation_date = bucket['CreationDate']
+        
+        # Skip buckets created within the last 30 minutes
+        if creation_date.timestamp() > delete_threshold:
+            continue
+
+        # Check if the bucket is empty
+        try:
+            objects = s3.list_objects_v2(Bucket=bucket_name)
+            if 'Contents' in objects:  # The bucket is not empty
+                continue
+        except Exception as e:
+            print(f"Error checking contents for bucket {bucket_name}: {e}")
+            continue
+
+        # Check bucket activity (last access/modification using CloudTrail)
+        try:
+            events = cloudtrail.lookup_events(
+                LookupAttributes=[
+                    {'AttributeKey': 'ResourceName', 'AttributeValue': bucket_name}
+                ],
+                StartTime=datetime.fromtimestamp(delete_threshold, timezone.utc),
+                EndTime=now
+            )
+            if events['Events']:
+                # Bucket has been accessed or modified within the threshold
+                continue
+        except Exception as e:
+            print(f"Error checking activity for bucket {bucket_name}: {e}")
+            continue
+
+        # Delete the bucket if conditions are met
+        try:
+            s3.delete_bucket(Bucket=bucket_name)
+            print(f"Deleted bucket: {bucket_name}")
+        except Exception as e:
+            print(f"Error deleting bucket {bucket_name}: {e}")
